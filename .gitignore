@@ -1,3 +1,5 @@
+.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -188,8 +190,8 @@ cython_debug/
 #  you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 
-# Ruff stuff:
-.ruff_cache/
+# typical caching files:
+.*_cache/
 
 # PyPI configuration file
 .pypirc
@@ -205,3 +207,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# agentics
+.claude
+CLAUDE.md
+AGENTS.md
+GEMINI.md
