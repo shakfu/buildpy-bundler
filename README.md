@@ -31,11 +31,12 @@ The built Python will be installed to `./build/install/python/`.
 ## Usage
 
 ```sh
-% buildpy --help
-usage: buildpy.py [-h] [-a CFG [CFG ...]] [-A] [-b OPTIMIZE_BYTECODE] [-c NAME]
-                  [-d] [-e] [-i PKG [PKG ...]] [-m] [-n] [-o] [-p] [-r]
-                  [-v VERSION] [-w] [-j JOBS] [-s] [-S] [-t TYPE]
-                  [--install-dir DIR]
+usage: buildpy.py [-h] [-a CFG [CFG ...]] [-b OPTIMIZE_BYTECODE] [-c NAME] [-d]
+                  [-n] [-e] [-i PKG [PKG ...]] [-m] [-o] [-p] [-r] [-v VERSION]
+                  [-w] [-j JOBS] [-s] [-t TYPE] [-S] [-A] [--auto-reduce]
+                  [--auto-config] [--auto-config-output PATH]
+                  [--apply-reductions MANIFEST] [--reduction-copy DIR]
+                  [--skip-ziplib] [--ziplib] [--install-dir DIR]
 
 A python builder
 
@@ -43,16 +44,15 @@ options:
   -h, --help            show this help message and exit
   -a, --cfg-opts CFG [CFG ...]
                         add config options
-  -A, --analyze-deps    analyze stdlib dependencies of packages
   -b, --optimize-bytecode OPTIMIZE_BYTECODE
                         set optimization levels -1 .. 2 (default: -1)
   -c, --config NAME     build configuration (default: shared_mid)
   -d, --debug           build debug python
+  -n, --dry-run         show build plan without building
   -e, --embeddable-pkg  install python embeddable package
   -i, --install PKG [PKG ...]
                         install python pkgs
   -m, --package         package build
-  -n, --dry-run         show build plan without building
   -o, --optimize        enable optimization during build
   -p, --precompile      precompile stdlib to bytecode
   -r, --reset           reset build
@@ -61,8 +61,24 @@ options:
   -w, --write           write configuration
   -j, --jobs JOBS       # of build jobs (default: 4)
   -s, --json            serialize config to json file
-  -S, --size-report     show size breakdown of build
   -t, --type TYPE       build based on build type
+  -S, --size-report     show size breakdown of build
+  -A, --analyze-deps    analyze stdlib dependencies of packages
+  --auto-reduce         automatic workflow: analyze deps, build with
+                        shared_vanilla, apply reductions, zip stdlib
+  --auto-config         generate reduction manifest based on dependency analysis
+  --auto-config-output PATH
+                        output path for reduction manifest (default: reduction-
+                        manifest.json)
+  --apply-reductions MANIFEST
+                        apply reduction manifest to remove unused files from
+                        build
+  --reduction-copy DIR  copy build to DIR before applying reductions (safer for
+                        testing)
+  --skip-ziplib         skip stdlib compression (use with --apply-reductions
+                        workflow)
+  --ziplib              compress stdlib of existing build (after --apply-
+                        reductions)
   --install-dir DIR     custom installation directory (overrides --package)
 ```
 
@@ -126,12 +142,30 @@ buildpy -A -i requests urllib3
 
 # Generate reduction manifest based on dependency analysis
 buildpy -A -i ipython --auto-config
+```
 
-# Automatic size optimization (recommended):
-# Single command to analyze deps, build, reduce, and compress
-buildpy -i ipython --auto-reduce
+### Size-Optimized Builds
 
-# Manual reduction workflow:
+The `--auto-reduce` flag provides a single-command workflow for creating minimal Python distributions:
+
+```bash
+# Build Python with only the modules needed for numpy
+buildpy -i numpy --auto-reduce
+```
+
+This command:
+1. Analyzes numpy's stdlib dependencies using AST-based import detection
+2. Builds (or reuses cached) vanilla Python with all modules as shared extensions
+3. Copies to `python-shared-reduced` and installs the specified packages
+4. Removes unused extension modules and stdlib directories
+5. Compresses the stdlib into a zip archive
+6. Verifies the build by importing each specified package
+
+The vanilla build is cached at `build/install/python-shared-vanilla` for fast iterations.
+
+**Manual workflow** (for more control):
+
+```bash
 # 1. Build without zipping stdlib
 buildpy -c shared_vanilla --skip-ziplib
 
@@ -177,6 +211,7 @@ Uses a shared libpython library.
 | `shared_max` | None |
 | `shared_mid` | `_ctypes`, `_ssl`, `_hashlib`, `_decimal` |
 | `shared_min` | Most optional modules |
+| `shared_vanilla` | None (all as shared extensions for post-build reduction) |
 
 ### Framework Builds (macOS only)
 
