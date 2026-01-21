@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 from urllib.request import urlretrieve
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # ----------------------------------------------------------------------------
 # type aliases
@@ -1997,9 +1997,9 @@ class PythonBuilder(Builder):
 
     def install_pkgs(self) -> None:
         """install python packages"""
-        required_pkgs = " ".join(self.required_packages)
+        pkgs = " ".join(self.pkgs)
         self.cmd(f"{self.python} -m ensurepip")
-        self.cmd(f"{self.pip} install {required_pkgs}")
+        self.cmd(f"{self.pip} install {pkgs}")
 
     def make_relocatable(self) -> None:
         """fix dylib/exe @rpath shared buildtype in macos"""

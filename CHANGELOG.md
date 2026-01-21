@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.1.1]
 
-- **Renamned to buildpy-bundler**: to avoid pypi name collision.
+### Changed
 
 - **Improved README.md**: Restructured documentation for better readability
   - Added Features, Requirements, and Quick Start sections
@@ -17,8 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added practical usage examples
   - Replaced verbose configuration descriptions with clear tables
   - Added Build Output section explaining directory structure
+  - Fixed CLI usage examples (removed incorrect `build` argument)
+  - Added missing CLI options (`-a`, `-b`, `-e`)
 
 ### Fixed
+
+- **Package installation bug**: Fixed `install_pkgs()` using `self.required_packages` instead of `self.pkgs`, which caused user-specified packages via `-i/--install` to never be installed
 
 - **Complete type annotations**: Fixed all 146 mypy type errors
   - Added return type annotations to all functions and methods
@@ -30,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added `log` attribute initialization to `Project` class
 
 ## [0.1.0]
+
+- **Renamed to buildpy-bundler**: to avoid pypi name collision.
 
 ### Security
 
@@ -112,10 +118,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
-- All 16 tests passing (100% pass rate)
+- All 38 tests passing (100% pass rate)
 - Updated test suite to match new exception types
 - Fixed test expectations for command execution (list vs string arguments)
 - **mypy type checking**: All type errors resolved, passes strict type checking
+- Added comprehensive tests for `-i/--install` package installation feature
+- Added tests for `pip_install` method in ShellCmd
 
 ### Type Safety
 

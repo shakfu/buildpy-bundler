@@ -90,5 +90,42 @@ def test_git_clone_full(shell):
         ]
         mock_cmd.assert_called_once_with(expected_cmd, cwd=".")
 
-# Add more test files for other functionality...
+class TestPipInstall:
+    """Tests for pip_install method"""
+
+    def test_pip_install_single_package(self, shell):
+        """Test installing a single package"""
+        with patch.object(shell, 'cmd') as mock_cmd:
+            shell.pip_install('requests')
+            mock_cmd.assert_called_once_with('pip3 install requests')
+
+    def test_pip_install_multiple_packages(self, shell):
+        """Test installing multiple packages"""
+        with patch.object(shell, 'cmd') as mock_cmd:
+            shell.pip_install('requests', 'numpy', 'pandas')
+            mock_cmd.assert_called_once_with('pip3 install requests numpy pandas')
+
+    def test_pip_install_with_custom_pip(self, shell):
+        """Test installing with custom pip executable"""
+        with patch.object(shell, 'cmd') as mock_cmd:
+            shell.pip_install('requests', pip='/usr/local/bin/pip3')
+            mock_cmd.assert_called_once_with('/usr/local/bin/pip3 install requests')
+
+    def test_pip_install_with_upgrade(self, shell):
+        """Test installing with upgrade flag"""
+        with patch.object(shell, 'cmd') as mock_cmd:
+            shell.pip_install('requests', upgrade=True)
+            mock_cmd.assert_called_once_with('pip3 install --upgrade requests')
+
+    def test_pip_install_from_requirements(self, shell):
+        """Test installing from requirements file"""
+        with patch.object(shell, 'cmd') as mock_cmd:
+            shell.pip_install(reqs='requirements.txt')
+            mock_cmd.assert_called_once_with('pip3 install -r requirements.txt')
+
+    def test_pip_install_no_packages(self, shell):
+        """Test calling pip_install with no packages"""
+        with patch.object(shell, 'cmd') as mock_cmd:
+            shell.pip_install()
+            mock_cmd.assert_called_once_with('pip3 install')
 

@@ -1,6 +1,6 @@
 [project]
 name = "buildpy-bundler"
-version = "0.1.0"
+version = "0.1.1"
 description = "Build a minimal, bespoke CPython runtime from source with size reduction, static linking, and a zipped standard library."
 readme = "README.md"
 license = "MIT"
