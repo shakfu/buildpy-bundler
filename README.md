@@ -32,9 +32,10 @@ The built Python will be installed to `./build/install/python/`.
 
 ```sh
 % buildpy --help
-usage: buildpy.py [-h] [-a CFG [CFG ...]] [-b OPTIMIZE_BYTECODE] [-c NAME] [-d]
-                  [-e] [-i PKG [PKG ...]] [-m] [-o] [-p] [-r] [-v VERSION] [-w]
-                  [-j JOBS] [-s] [-t TYPE] [--install-dir DIR]
+usage: buildpy.py [-h] [-a CFG [CFG ...]] [-A] [-b OPTIMIZE_BYTECODE] [-c NAME]
+                  [-d] [-e] [-i PKG [PKG ...]] [-m] [-n] [-o] [-p] [-r]
+                  [-v VERSION] [-w] [-j JOBS] [-s] [-S] [-t TYPE]
+                  [--install-dir DIR]
 
 A python builder
 
@@ -42,6 +43,7 @@ options:
   -h, --help            show this help message and exit
   -a, --cfg-opts CFG [CFG ...]
                         add config options
+  -A, --analyze-deps    analyze stdlib dependencies of packages
   -b, --optimize-bytecode OPTIMIZE_BYTECODE
                         set optimization levels -1 .. 2 (default: -1)
   -c, --config NAME     build configuration (default: shared_mid)
@@ -50,6 +52,7 @@ options:
   -i, --install PKG [PKG ...]
                         install python pkgs
   -m, --package         package build
+  -n, --dry-run         show build plan without building
   -o, --optimize        enable optimization during build
   -p, --precompile      precompile stdlib to bytecode
   -r, --reset           reset build
@@ -58,6 +61,7 @@ options:
   -w, --write           write configuration
   -j, --jobs JOBS       # of build jobs (default: 4)
   -s, --json            serialize config to json file
+  -S, --size-report     show size breakdown of build
   -t, --type TYPE       build based on build type
   --install-dir DIR     custom installation directory (overrides --package)
 ```
@@ -82,6 +86,16 @@ options:
 | `-s, --json` | Export configuration to JSON |
 | `-a, --cfg-opts CFG [CFG ...]` | Add config options |
 | `-e, --embeddable-pkg` | Install python embeddable package |
+| `-n, --dry-run` | Show build plan without building |
+| `-S, --size-report` | Show size breakdown of build |
+| `-A, --analyze-deps` | Analyze stdlib dependencies of packages |
+| `--auto-reduce` | Automatic workflow: analyze, build, reduce, compress |
+| `--auto-config` | Generate reduction manifest based on analysis |
+| `--auto-config-output PATH` | Output path for reduction manifest |
+| `--apply-reductions MANIFEST` | Apply reduction manifest to remove unused files |
+| `--reduction-copy DIR` | Copy build to DIR before applying reductions |
+| `--skip-ziplib` | Skip stdlib compression (for reduction workflow) |
+| `--ziplib` | Compress stdlib of existing build |
 
 ### Examples
 
@@ -100,6 +114,35 @@ buildpy --install-dir /opt/python
 
 # Build and install packages (e.g., for embedding)
 buildpy -i requests numpy pandas
+
+# Preview build plan without building (dry-run)
+buildpy -n -c static_mid -v 3.12
+
+# Analyze size of completed build
+buildpy -S
+
+# Analyze stdlib dependencies of packages
+buildpy -A -i requests urllib3
+
+# Generate reduction manifest based on dependency analysis
+buildpy -A -i ipython --auto-config
+
+# Automatic size optimization (recommended):
+# Single command to analyze deps, build, reduce, and compress
+buildpy -i ipython --auto-reduce
+
+# Manual reduction workflow:
+# 1. Build without zipping stdlib
+buildpy -c shared_vanilla --skip-ziplib
+
+# 2. Apply reductions
+buildpy --apply-reductions reduction-manifest.json
+
+# 3. Compress the reduced stdlib
+buildpy --ziplib
+
+# Or apply to a copy for testing:
+buildpy --apply-reductions reduction-manifest.json --reduction-copy build/reduced
 ```
 
 ## Configurations
@@ -112,6 +155,7 @@ Configurations follow the naming pattern `<build-type>_<size-type>`:
 | `mid` | Balanced selection (recommended) |
 | `min` | Minimal footprint |
 | `bootstrap` | Absolute minimum for bootstrapping |
+| `vanilla` | All modules as shared extensions (for `--auto-reduce`) |
 
 ### Static Builds
 

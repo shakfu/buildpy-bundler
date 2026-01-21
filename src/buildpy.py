@@ -32,6 +32,7 @@ ShellCmd
 """
 
 import argparse
+import copy
 import datetime
 import hashlib
 import json
@@ -47,6 +48,7 @@ import tarfile
 import zipfile
 from fnmatch import fnmatch
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union
 from urllib.request import urlretrieve
 
@@ -58,6 +60,23 @@ __version__ = "0.1.1"
 Pathlike = Union[str, Path]
 MatchFn = Callable[[Path], bool]
 ActionFn = Callable[[Path], None]
+
+
+# ----------------------------------------------------------------------------
+# dataclasses
+
+
+@dataclass
+class AnalysisResult:
+    """Result of package dependency analysis."""
+
+    stdlib_imports: set[str]
+    third_party: set[str]
+    required_extensions: set[str]
+    needed_but_disabled: set[str]
+    potentially_unused: set[str]
+    files_analyzed: int
+
 
 # ----------------------------------------------------------------------------
 # env helpers
@@ -524,7 +543,7 @@ class Config:
     log: logging.Logger
 
     def __init__(self, cfg: dict[str, Any]) -> None:
-        self.cfg: dict[str, Any] = cfg.copy()
+        self.cfg: dict[str, Any] = copy.deepcopy(cfg)
         self.out = ["# -*- makefile -*-"] + self.cfg["header"] + ["\n# core\n"]
         self.log = logging.getLogger(self.__class__.__name__)
         self.install_name_id: Optional[str] = None
@@ -669,6 +688,52 @@ class PythonConfig(Config):
     def shared_mid(self) -> None:
         """shared build variant mid-size"""
         self.disable_static("_decimal", "_ssl", "_hashlib")
+
+    def shared_vanilla(self) -> None:
+        """shared build variant with most modules as shared extensions.
+
+        This configuration moves most static modules to shared, enabling
+        post-build removal of unused extensions. Use with --auto-reduce
+        for automatic size optimization based on dependency analysis.
+
+        Some modules must remain static because they reference internal
+        Python symbols (Py_BUILD_CORE_BUILTIN) or private type objects.
+        """
+        # Modules that MUST remain static - they reference internal Python
+        # symbols that aren't exported in shared builds
+        must_stay_static = {
+            # Modules with Py_BUILD_CORE_BUILTIN flag
+            "_functools",
+            "_locale",
+            "_signal",
+            "_sre",
+            "_thread",
+            "posix",
+            "time",
+            # Modules referencing internal type objects
+            "_typing",  # references __PyTypeAlias_Type
+        }
+
+        # Enable all disabled modules that can be built
+        for mod in [
+            "_ctypes",
+            "_curses",
+            "_curses_panel",
+            "_dbm",
+            "_scproxy",
+            "_tkinter",
+            "resource",
+            "syslog",
+            "termios",
+        ]:
+            if mod in self.cfg["disabled"]:
+                self.cfg["disabled"].remove(mod)
+
+        # Move static modules to shared (except those that must stay static)
+        static_mods = self.cfg["static"].copy()
+        for mod in static_mods:
+            if mod not in must_stay_static:
+                self.move_static_to_shared(mod)
 
     def framework_max(self) -> None:
         """framework build variant max-size"""
@@ -1710,6 +1775,7 @@ class PythonBuilder(Builder):
         jobs: int = 1,
         is_package: bool = False,
         install_dir: Optional[Pathlike] = None,
+        skip_ziplib: bool = False,
     ):
         super().__init__(version, project)
         self.config = config
@@ -1719,6 +1785,7 @@ class PythonBuilder(Builder):
         self.pkgs = pkgs or []
         self.cfg_opts = cfg_opts or []
         self.jobs = jobs
+        self.skip_ziplib = skip_ziplib
 
         # Handle install_dir specification
         # Priority: explicit install_dir > is_package (for backwards compatibility) > default (install)
@@ -1754,6 +1821,1448 @@ class PythonBuilder(Builder):
     def size_type(self) -> str:
         """size qualifier: 'max', 'mid', 'min', etc.."""
         return self.config.split("_")[1]
+
+    def dry_run(self) -> None:
+        """Display build plan without actually building.
+
+        Shows configuration details, modules, dependencies, and build options
+        that would be used if the build were to proceed.
+        """
+        config = self.get_config()
+        # Apply the configuration method to populate module lists
+        getattr(config, self.config)()
+
+        # Build configure options that would be used
+        config_options = self.config_options.copy()
+        if self.build_type == "static":
+            config_options.append("--disable-shared")
+        elif self.build_type == "shared":
+            config_options.append("--enable-shared")
+        elif self.build_type == "framework":
+            config_options.append("--enable-framework")
+        if self.optimize:
+            config_options.append("--enable-optimizations")
+        if not self.pkgs and not self.required_packages:
+            config_options.append("--without-ensurepip")
+        if self.cfg_opts:
+            for cfg_opt in self.cfg_opts:
+                cfg_opt = cfg_opt.replace("_", "-")
+                cfg_opt = "--" + cfg_opt
+                if cfg_opt not in config_options:
+                    config_options.append(cfg_opt)
+
+        # Print the build plan
+        print("\n" + "=" * 60)
+        print("BUILD PLAN (dry-run)")
+        print("=" * 60)
+
+        print("\n[Build Target]")
+        print(f"  Python version:    {self.version}")
+        print(f"  Configuration:     {self.config}")
+        print(f"  Build type:        {self.build_type}")
+        print(f"  Size type:         {self.size_type}")
+        print(f"  Platform:          {PLATFORM} ({ARCH})")
+
+        print("\n[Directories]")
+        print(f"  Install directory: {self._install_dir}")
+        print(f"  Prefix:            {self.prefix}")
+        print(f"  Source directory:  {self.src_dir}")
+
+        print("\n[Build Options]")
+        print(f"  Parallel jobs:     {self.jobs}")
+        print(f"  Optimize build:    {self.optimize}")
+        print(f"  Precompile stdlib: {self.precompile}")
+        print(f"  Bytecode opt:      {self.optimize_bytecode}")
+
+        print("\n[Configure Options]")
+        for opt in sorted(config_options):
+            print(f"  {opt}")
+
+        print("\n[Dependencies]")
+        if self.depends_on:
+            for dep_class in self.depends_on:
+                dep = dep_class()
+                print(f"  {dep.name} {dep.version}")
+        else:
+            print("  (none)")
+
+        print(f"\n[Modules - Core] ({len(config.cfg['core'])})")
+        for mod in sorted(config.cfg["core"]):
+            print(f"  {mod}")
+
+        print(f"\n[Modules - Static] ({len(config.cfg['static'])})")
+        if config.cfg["static"]:
+            for mod in sorted(config.cfg["static"]):
+                print(f"  {mod}")
+        else:
+            print("  (none)")
+
+        print(f"\n[Modules - Shared] ({len(config.cfg['shared'])})")
+        if config.cfg["shared"]:
+            for mod in sorted(config.cfg["shared"]):
+                print(f"  {mod}")
+        else:
+            print("  (none)")
+
+        print(f"\n[Modules - Disabled] ({len(config.cfg['disabled'])})")
+        if config.cfg["disabled"]:
+            for mod in sorted(config.cfg["disabled"]):
+                print(f"  {mod}")
+        else:
+            print("  (none)")
+
+        if self.pkgs:
+            print(f"\n[Packages to Install] ({len(self.pkgs)})")
+            for pkg in self.pkgs:
+                print(f"  {pkg}")
+
+        print("\n" + "=" * 60)
+        print("End of build plan. No changes were made.")
+        print("=" * 60 + "\n")
+
+    def size_report(self) -> None:
+        """Display size breakdown of a completed build.
+
+        Analyzes the build output directory and reports sizes by component:
+        binaries, stdlib, lib-dynload, shared libraries, etc.
+        """
+        if not self.prefix.exists():
+            print(f"\nError: Build directory not found: {self.prefix}")
+            print("Run a build first, then use --size-report to analyze it.")
+            return
+
+        def format_size(size_bytes: int) -> str:
+            """Format size in human-readable units"""
+            size: float = float(size_bytes)
+            for unit in ["B", "KB", "MB", "GB"]:
+                if size < 1024:
+                    return f"{size:,.1f} {unit}"
+                size /= 1024
+            return f"{size:,.1f} TB"
+
+        def get_dir_size(path: Path) -> int:
+            """Calculate total size of a directory"""
+            total = 0
+            if path.is_file():
+                return path.stat().st_size
+            if path.is_dir():
+                for item in path.rglob("*"):
+                    if item.is_file():
+                        total += item.stat().st_size
+            return total
+
+        def get_file_sizes(path: Path) -> dict[str, int]:
+            """Get sizes of individual files in a directory"""
+            sizes: dict[str, int] = {}
+            if path.is_dir():
+                for item in path.iterdir():
+                    if item.is_file():
+                        sizes[item.name] = item.stat().st_size
+            return sizes
+
+        # Calculate sizes for each component
+        components: dict[str, int] = {}
+
+        # Binaries (bin/)
+        bin_dir = self.prefix / "bin"
+        if bin_dir.exists():
+            components["bin/ (executables)"] = get_dir_size(bin_dir)
+
+        # Main library directory
+        lib_dir = self.prefix / "lib"
+        if lib_dir.exists():
+            # Shared/static libraries at lib/ level
+            lib_files_size = 0
+            for item in lib_dir.iterdir():
+                if item.is_file():
+                    lib_files_size += item.stat().st_size
+            if lib_files_size > 0:
+                components["lib/*.{so,dylib,a} (libraries)"] = lib_files_size
+
+        # Python stdlib (lib/pythonX.Y/)
+        stdlib_dir = self.prefix / "lib" / self.name_ver
+        if stdlib_dir.exists():
+            # Calculate stdlib without lib-dynload
+            stdlib_size = 0
+            lib_dynload_dir = stdlib_dir / "lib-dynload"
+
+            for item in stdlib_dir.rglob("*"):
+                if item.is_file():
+                    # Skip lib-dynload, we count it separately
+                    try:
+                        item.relative_to(lib_dynload_dir)
+                    except ValueError:
+                        stdlib_size += item.stat().st_size
+
+            components["lib/pythonX.Y/ (stdlib)"] = stdlib_size
+
+            # lib-dynload (dynamically loaded modules)
+            if lib_dynload_dir.exists():
+                components["lib/pythonX.Y/lib-dynload/"] = get_dir_size(lib_dynload_dir)
+
+        # Check for zipped stdlib
+        zip_path = self.prefix / "lib" / f"python{self.ver.replace('.', '')}.zip"
+        if zip_path.exists():
+            components["pythonXY.zip (zipped stdlib)"] = zip_path.stat().st_size
+
+        # Include directory
+        include_dir = self.prefix / "include"
+        if include_dir.exists():
+            components["include/ (headers)"] = get_dir_size(include_dir)
+
+        # Share directory (usually man pages, etc.)
+        share_dir = self.prefix / "share"
+        if share_dir.exists():
+            components["share/ (docs/man)"] = get_dir_size(share_dir)
+
+        # Framework-specific (macOS)
+        if self.build_type == "framework":
+            resources_dir = self.prefix / "Resources"
+            if resources_dir.exists():
+                components["Resources/"] = get_dir_size(resources_dir)
+
+        # Calculate total
+        total_size = get_dir_size(self.prefix)
+
+        # Print the report
+        print("\n" + "=" * 70)
+        print("BUILD SIZE REPORT")
+        print("=" * 70)
+
+        print("\n[Build Info]")
+        print(f"  Location:      {self.prefix}")
+        print(f"  Configuration: {self.config}")
+        print(f"  Build type:    {self.build_type}")
+        print(f"  Python:        {self.version}")
+
+        print("\n[Size Breakdown]")
+        print(f"  {'Component':<40} {'Size':>12} {'%':>8}")
+        print(f"  {'-' * 40} {'-' * 12} {'-' * 8}")
+
+        # Sort by size descending
+        sorted_components = sorted(components.items(), key=lambda x: x[1], reverse=True)
+
+        for name, size in sorted_components:
+            pct = (size / total_size * 100) if total_size > 0 else 0
+            print(f"  {name:<40} {format_size(size):>12} {pct:>7.1f}%")
+
+        # Other (unaccounted)
+        accounted = sum(components.values())
+        other = total_size - accounted
+        if other > 0:
+            pct = (other / total_size * 100) if total_size > 0 else 0
+            print(f"  {'(other)':<40} {format_size(other):>12} {pct:>7.1f}%")
+
+        print(f"  {'-' * 40} {'-' * 12} {'-' * 8}")
+        print(f"  {'TOTAL':<40} {format_size(total_size):>12} {'100.0%':>8}")
+
+        # Top 10 largest files
+        print("\n[Largest Files]")
+        all_files: list[tuple[Path, int]] = []
+        for item in self.prefix.rglob("*"):
+            if item.is_file():
+                all_files.append((item, item.stat().st_size))
+
+        all_files.sort(key=lambda x: x[1], reverse=True)
+
+        print(f"  {'File':<50} {'Size':>12}")
+        print(f"  {'-' * 50} {'-' * 12}")
+        for filepath, size in all_files[:10]:
+            try:
+                rel_path = filepath.relative_to(self.prefix)
+            except ValueError:
+                rel_path = filepath
+            name = str(rel_path)
+            if len(name) > 48:
+                name = "..." + name[-45:]
+            print(f"  {name:<50} {format_size(size):>12}")
+
+        print("\n" + "=" * 70 + "\n")
+
+    # Comprehensive list of stdlib module names (top-level)
+    # This covers Python 3.11-3.14
+    STDLIB_MODULES: set[str] = {
+        # Built-in modules (always available)
+        "abc",
+        "aifc",
+        "argparse",
+        "array",
+        "ast",
+        "asyncio",
+        "atexit",
+        "base64",
+        "bdb",
+        "binascii",
+        "bisect",
+        "builtins",
+        "bz2",
+        "calendar",
+        "cgi",
+        "cgitb",
+        "chunk",
+        "cmath",
+        "cmd",
+        "code",
+        "codecs",
+        "codeop",
+        "collections",
+        "colorsys",
+        "compileall",
+        "concurrent",
+        "configparser",
+        "contextlib",
+        "contextvars",
+        "copy",
+        "copyreg",
+        "cProfile",
+        "crypt",
+        "csv",
+        "ctypes",
+        "curses",
+        "dataclasses",
+        "datetime",
+        "dbm",
+        "decimal",
+        "difflib",
+        "dis",
+        "doctest",
+        "email",
+        "encodings",
+        "enum",
+        "errno",
+        "faulthandler",
+        "fcntl",
+        "filecmp",
+        "fileinput",
+        "fnmatch",
+        "fractions",
+        "ftplib",
+        "functools",
+        "gc",
+        "getopt",
+        "getpass",
+        "gettext",
+        "glob",
+        "graphlib",
+        "grp",
+        "gzip",
+        "hashlib",
+        "heapq",
+        "hmac",
+        "html",
+        "http",
+        "idlelib",
+        "imaplib",
+        "imghdr",
+        "importlib",
+        "inspect",
+        "io",
+        "ipaddress",
+        "itertools",
+        "json",
+        "keyword",
+        "lib2to3",
+        "linecache",
+        "locale",
+        "logging",
+        "lzma",
+        "mailbox",
+        "mailcap",
+        "marshal",
+        "math",
+        "mimetypes",
+        "mmap",
+        "modulefinder",
+        "multiprocessing",
+        "netrc",
+        "nis",
+        "nntplib",
+        "numbers",
+        "operator",
+        "optparse",
+        "os",
+        "ossaudiodev",
+        "pathlib",
+        "pdb",
+        "pickle",
+        "pickletools",
+        "pipes",
+        "pkgutil",
+        "platform",
+        "plistlib",
+        "poplib",
+        "posix",
+        "posixpath",
+        "pprint",
+        "profile",
+        "pstats",
+        "pty",
+        "pwd",
+        "py_compile",
+        "pyclbr",
+        "pydoc",
+        "queue",
+        "quopri",
+        "random",
+        "re",
+        "readline",
+        "reprlib",
+        "resource",
+        "rlcompleter",
+        "runpy",
+        "sched",
+        "secrets",
+        "select",
+        "selectors",
+        "shelve",
+        "shlex",
+        "shutil",
+        "signal",
+        "site",
+        "smtpd",
+        "smtplib",
+        "sndhdr",
+        "socket",
+        "socketserver",
+        "spwd",
+        "sqlite3",
+        "ssl",
+        "stat",
+        "statistics",
+        "string",
+        "stringprep",
+        "struct",
+        "subprocess",
+        "sunau",
+        "symtable",
+        "sys",
+        "sysconfig",
+        "syslog",
+        "tabnanny",
+        "tarfile",
+        "telnetlib",
+        "tempfile",
+        "termios",
+        "test",
+        "textwrap",
+        "threading",
+        "time",
+        "timeit",
+        "tkinter",
+        "token",
+        "tokenize",
+        "tomllib",
+        "trace",
+        "traceback",
+        "tracemalloc",
+        "tty",
+        "turtle",
+        "turtledemo",
+        "types",
+        "typing",
+        "unicodedata",
+        "unittest",
+        "urllib",
+        "uu",
+        "uuid",
+        "venv",
+        "warnings",
+        "wave",
+        "weakref",
+        "webbrowser",
+        "winreg",
+        "winsound",
+        "wsgiref",
+        "xdrlib",
+        "xml",
+        "xmlrpc",
+        "zipapp",
+        "zipfile",
+        "zipimport",
+        "zlib",
+        "zoneinfo",
+        # Private/internal modules that map to C extensions
+        "_abc",
+        "_asyncio",
+        "_bisect",
+        "_blake2",
+        "_bz2",
+        "_codecs",
+        "_collections",
+        "_contextvars",
+        "_csv",
+        "_ctypes",
+        "_datetime",
+        "_decimal",
+        "_elementtree",
+        "_functools",
+        "_hashlib",
+        "_heapq",
+        "_io",
+        "_json",
+        "_locale",
+        "_lsprof",
+        "_lzma",
+        "_md5",
+        "_multibytecodec",
+        "_multiprocessing",
+        "_opcode",
+        "_operator",
+        "_pickle",
+        "_posixshmem",
+        "_posixsubprocess",
+        "_queue",
+        "_random",
+        "_sha1",
+        "_sha256",
+        "_sha512",
+        "_sha3",
+        "_signal",
+        "_socket",
+        "_sqlite3",
+        "_sre",
+        "_ssl",
+        "_stat",
+        "_statistics",
+        "_struct",
+        "_symtable",
+        "_thread",
+        "_tracemalloc",
+        "_typing",
+        "_uuid",
+        "_weakref",
+        "_zoneinfo",
+    }
+
+    # Map of stdlib modules to the C extension modules they require
+    # Includes transitive dependencies (e.g., inspect -> dis -> opcode -> _opcode)
+    STDLIB_TO_EXTENSION: dict[str, list[str]] = {
+        "hashlib": [
+            "_hashlib",
+            "_md5",
+            "_sha1",
+            "_sha256",
+            "_sha512",
+            "_sha3",
+            "_blake2",
+        ],
+        "ssl": ["_ssl"],
+        "sqlite3": ["_sqlite3"],
+        "json": ["_json"],
+        "pickle": ["_pickle"],
+        "datetime": ["_datetime"],
+        "decimal": ["_decimal"],
+        "ctypes": ["_ctypes"],
+        "lzma": ["_lzma"],
+        "bz2": ["_bz2"],
+        "zlib": ["zlib"],
+        "xml": ["_elementtree", "pyexpat"],
+        "csv": ["_csv"],
+        "asyncio": ["_asyncio"],
+        "multiprocessing": ["_multiprocessing", "_posixshmem"],
+        "collections": ["_collections"],
+        "functools": ["_functools"],
+        "itertools": ["itertools"],
+        "math": ["math", "cmath"],
+        "struct": ["_struct"],
+        "array": ["array"],
+        "select": ["select"],
+        "socket": ["_socket"],
+        "unicodedata": ["unicodedata"],
+        "binascii": ["binascii"],
+        "mmap": ["mmap"],
+        "fcntl": ["fcntl"],
+        "grp": ["grp"],
+        "pwd": ["pwd"],
+        "readline": ["readline"],
+        "uuid": ["_uuid"],
+        "statistics": ["_statistics"],
+        "typing": ["_typing"],
+        # Transitive dependencies
+        "inspect": ["_opcode"],  # inspect -> dis -> opcode -> _opcode
+        "dis": ["_opcode"],  # dis -> opcode -> _opcode
+        "subprocess": ["_posixsubprocess", "select", "fcntl"],  # POSIX subprocess
+        "random": ["_random"],
+        "heapq": ["_heapq"],
+        "bisect": ["_bisect"],
+        "contextvars": ["_contextvars"],
+        "zoneinfo": ["_zoneinfo"],
+    }
+
+    # Core modules that should never be disabled
+    CORE_MODULES: set[str] = {
+        "_abc",
+        "_io",
+        "_sre",
+        "_codecs",
+        "_collections",
+        "_functools",
+        "_locale",
+        "_operator",
+        "_signal",
+        "_stat",
+        "_symtable",
+        "_thread",
+        "_tracemalloc",
+        "_weakref",
+        "atexit",
+        "errno",
+        "faulthandler",
+        "itertools",
+        "posix",
+        "pwd",
+        "time",
+        # zlib is required for decompressing the zipped stdlib
+        "zlib",
+    }
+
+    def _extract_imports(self, source_code: str) -> set[str]:
+        """Extract all imported module names from Python source code."""
+        import ast
+
+        imports: set[str] = set()
+        try:
+            tree = ast.parse(source_code)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        # Get top-level module name
+                        imports.add(alias.name.split(".")[0])
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        imports.add(node.module.split(".")[0])
+        except SyntaxError:
+            pass  # Skip files that can't be parsed
+        return imports
+
+    def _analyze_package_deps(self, verbose: bool = True) -> Optional[AnalysisResult]:
+        """Analyze stdlib dependencies of packages specified via -i/--install.
+
+        Downloads packages, extracts them, analyzes Python files for imports,
+        and returns structured analysis results.
+
+        Args:
+            verbose: If True, print progress messages during analysis.
+
+        Returns:
+            AnalysisResult with analysis data, or None if no packages specified.
+        """
+        import tempfile
+
+        if not self.pkgs:
+            if verbose:
+                print(
+                    "\nError: No packages specified. Use -i/--install to specify packages."
+                )
+                print("Example: buildpy -A -i requests numpy")
+            return None
+
+        if verbose:
+            print("\n[Packages to Analyze]")
+            for pkg in self.pkgs:
+                print(f"  - {pkg}")
+
+        # Create temp directory for downloads
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+
+            if verbose:
+                print("\n[Downloading Packages]")
+
+            # Use pip download to get packages
+            # Try multiple pip options: pip3, pip, or python -m pip
+            pip_commands = [
+                ["pip3", "download", "--no-deps", "-d", str(tmppath)],
+                ["pip", "download", "--no-deps", "-d", str(tmppath)],
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "download",
+                    "--no-deps",
+                    "-d",
+                    str(tmppath),
+                ],
+            ]
+
+            download_success = False
+            for pip_cmd in pip_commands:
+                try:
+                    result = subprocess.run(
+                        pip_cmd + list(self.pkgs),
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.returncode == 0:
+                        download_success = True
+                        break
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    continue
+
+            if not download_success and verbose:
+                print("  Warning: Could not download packages (pip not available)")
+                print("  Attempting analysis without downloading...")
+
+            # Find all downloaded files
+            all_imports: set[str] = set()
+            files_analyzed = 0
+
+            for archive in tmppath.glob("*"):
+                if verbose:
+                    print(f"  Analyzing: {archive.name}")
+
+                # Extract and analyze
+                if archive.suffix == ".whl" or archive.name.endswith(".whl"):
+                    # Wheel files are zip files
+                    try:
+                        with zipfile.ZipFile(archive) as zf:
+                            for name in zf.namelist():
+                                if name.endswith(".py"):
+                                    try:
+                                        content = zf.read(name).decode(
+                                            "utf-8", errors="ignore"
+                                        )
+                                        imports = self._extract_imports(content)
+                                        all_imports.update(imports)
+                                        files_analyzed += 1
+                                    except Exception:
+                                        pass
+                    except Exception as e:
+                        if verbose:
+                            print(f"    Could not analyze {archive.name}: {e}")
+
+                elif archive.suffix == ".gz" and ".tar" in archive.name:
+                    # Tarball
+                    try:
+                        with tarfile.open(archive) as tf:
+                            for member in tf.getmembers():
+                                if member.name.endswith(".py"):
+                                    try:
+                                        f = tf.extractfile(member)
+                                        if f:
+                                            content = f.read().decode(
+                                                "utf-8", errors="ignore"
+                                            )
+                                            imports = self._extract_imports(content)
+                                            all_imports.update(imports)
+                                            files_analyzed += 1
+                                    except Exception:
+                                        pass
+                    except Exception as e:
+                        if verbose:
+                            print(f"    Could not analyze {archive.name}: {e}")
+
+            if verbose:
+                print(f"\n  Files analyzed: {files_analyzed}")
+
+        # Filter to stdlib modules only
+        stdlib_imports = all_imports & self.STDLIB_MODULES
+        third_party = all_imports - self.STDLIB_MODULES
+
+        # Get required C extension modules
+        required_extensions: set[str] = set()
+        for mod in stdlib_imports:
+            if mod in self.STDLIB_TO_EXTENSION:
+                required_extensions.update(self.STDLIB_TO_EXTENSION[mod])
+            # Also check if the import is directly a C extension
+            if mod.startswith("_"):
+                required_extensions.add(mod)
+
+        # Compare with current config
+        config = self.get_config()
+        getattr(config, self.config)()
+
+        current_static = set(config.cfg["static"])
+        current_shared = set(config.cfg["shared"])
+        current_disabled = set(config.cfg["disabled"])
+        current_enabled = current_static | current_shared | set(config.cfg["core"])
+
+        # Find modules that could potentially be disabled (excluding core)
+        potentially_unused = current_enabled - required_extensions - self.CORE_MODULES
+
+        # Find modules that are needed but disabled
+        needed_but_disabled = required_extensions & current_disabled
+
+        return AnalysisResult(
+            stdlib_imports=stdlib_imports,
+            third_party=third_party,
+            required_extensions=required_extensions,
+            needed_but_disabled=needed_but_disabled,
+            potentially_unused=potentially_unused,
+            files_analyzed=files_analyzed,
+        )
+
+    def analyze_deps(self) -> None:
+        """Analyze stdlib dependencies of packages specified via -i/--install.
+
+        Downloads packages, extracts them, analyzes Python files for imports,
+        and reports which stdlib modules are required. Suggests config optimizations.
+        """
+        print("\n" + "=" * 70)
+        print("DEPENDENCY ANALYSIS")
+        print("=" * 70)
+
+        result = self._analyze_package_deps(verbose=True)
+        if result is None:
+            return
+
+        print(f"\n[Stdlib Modules Used] ({len(result.stdlib_imports)})")
+        for mod in sorted(result.stdlib_imports):
+            ext_note = ""
+            if mod in self.STDLIB_TO_EXTENSION:
+                ext_note = f" -> {', '.join(self.STDLIB_TO_EXTENSION[mod])}"
+            print(f"  {mod}{ext_note}")
+
+        if result.third_party:
+            print(f"\n[Third-Party Dependencies] ({len(result.third_party)})")
+            for mod in sorted(result.third_party):
+                print(f"  {mod}")
+
+        # Get config info for display
+        config = self.get_config()
+        getattr(config, self.config)()
+        current_static = set(config.cfg["static"])
+        current_shared = set(config.cfg["shared"])
+        current_enabled = current_static | current_shared | set(config.cfg["core"])
+
+        print("\n[Configuration Analysis]")
+        print(f"  Current config:     {self.config}")
+        print(f"  Enabled modules:    {len(current_enabled)}")
+        print(f"  Required by pkgs:   {len(result.required_extensions)}")
+
+        if result.needed_but_disabled:
+            print("\n[WARNING: Required modules are DISABLED]")
+            for mod in sorted(result.needed_but_disabled):
+                print(f"  {mod} - NEEDS TO BE ENABLED")
+
+        if result.potentially_unused:
+            print(f"\n[Potentially Unused Modules] ({len(result.potentially_unused)})")
+            print("  These modules are enabled but may not be needed:")
+            for mod in sorted(result.potentially_unused)[:20]:  # Show first 20
+                print(f"  {mod}")
+            if len(result.potentially_unused) > 20:
+                print(f"  ... and {len(result.potentially_unused) - 20} more")
+
+        # Suggest a minimal config
+        print("\n[Recommendations]")
+        if result.needed_but_disabled:
+            print("  1. Enable these disabled modules for your packages to work:")
+            for mod in sorted(result.needed_but_disabled):
+                print(f"     --cfg-opts enable_{mod.lstrip('_')}")
+
+        if len(result.potentially_unused) > 10:
+            print(f"  2. Consider using a smaller config (e.g., {self.build_type}_min)")
+            print("     or create a custom config disabling unused modules")
+
+        if not result.needed_but_disabled and len(result.potentially_unused) <= 5:
+            print(
+                "  Your current configuration appears well-suited for these packages."
+            )
+
+        print("\n" + "=" * 70)
+        print("Note: This analysis is based on static import detection.")
+        print("Runtime imports (importlib, __import__) may not be detected.")
+        print("=" * 70 + "\n")
+
+    def auto_configure(
+        self,
+        output_path: Optional[Pathlike] = None,
+    ) -> Optional[Path]:
+        """Generate a reduction manifest based on dependency analysis.
+
+        Instead of modifying Setup.local (which breaks ensurepip), this generates
+        a manifest of files to remove post-build. The reduction is applied after
+        the build completes, before the stdlib is compressed.
+
+        Args:
+            output_path: Path for output manifest. Defaults to reduction-manifest.json
+
+        Returns:
+            Path to the generated manifest file, or None if analysis failed.
+        """
+        print("\n" + "=" * 70)
+        print("GENERATING REDUCTION MANIFEST")
+        print("=" * 70)
+
+        result = self._analyze_package_deps(verbose=True)
+        if result is None:
+            return None
+
+        # Build the reduction manifest
+        # These are modules that are enabled but not required by the analyzed packages
+        extensions_to_remove: list[str] = []
+        for mod in result.potentially_unused:
+            # Never remove core modules
+            if mod in self.CORE_MODULES:
+                continue
+            extensions_to_remove.append(mod)
+
+        # Map extension modules to their file patterns in lib-dynload/
+        # Extension files are typically named: _module.cpython-3XX-platform.so
+        extension_patterns: list[str] = []
+        for mod in extensions_to_remove:
+            # Handle both _module and module naming
+            extension_patterns.append(f"{mod}.cpython-*.so")
+            extension_patterns.append(f"{mod}.*.so")
+
+        # Identify pure Python stdlib modules that can be removed
+        # Map of stdlib imports to their directory/file in lib/pythonX.Y/
+        stdlib_module_paths: dict[str, list[str]] = {
+            "tkinter": ["tkinter/", "turtle.py", "turtledemo/"],
+            "idlelib": ["idlelib/"],
+            "test": ["test/"],
+            "lib2to3": ["lib2to3/"],
+            "ensurepip": [],  # Never remove - needed for pip installation
+            "distutils": ["distutils/"],
+            "curses": ["curses/"],
+            "dbm": ["dbm/"],
+            "multiprocessing": ["multiprocessing/"],
+            "concurrent": ["concurrent/"],
+            "asyncio": ["asyncio/"],
+            "email": ["email/"],
+            "html": ["html/"],
+            "http": ["http/"],
+            "json": ["json/"],
+            "logging": ["logging/"],
+            "unittest": ["unittest/"],
+            "urllib": ["urllib/"],
+            "xml": ["xml/"],
+            "xmlrpc": ["xmlrpc/"],
+            "ctypes": ["ctypes/"],
+            "sqlite3": ["sqlite3/"],
+            "pydoc_data": ["pydoc_data/"],
+        }
+
+        # Determine which stdlib paths can be removed
+        stdlib_to_remove: list[str] = []
+        required_stdlib = result.stdlib_imports | {"ensurepip", "pip", "setuptools"}
+
+        for mod, paths in stdlib_module_paths.items():
+            if mod not in required_stdlib and paths:
+                stdlib_to_remove.extend(paths)
+
+        # Build the manifest
+        warnings_list: list[dict[str, Any]] = []
+
+        # Add warnings for modules that are needed but might be disabled
+        if result.needed_but_disabled:
+            warnings_list.append(
+                {
+                    "type": "required_but_disabled",
+                    "message": "These modules are required but disabled in current config",
+                    "modules": sorted(result.needed_but_disabled),
+                }
+            )
+
+        manifest: dict[str, Any] = {
+            "version": "1.0",
+            "python_version": self.version,
+            "config": self.config,
+            "packages_analyzed": list(self.pkgs) if self.pkgs else [],
+            "analysis": {
+                "required_extensions": sorted(result.required_extensions),
+                "stdlib_imports": sorted(result.stdlib_imports),
+                "third_party": sorted(result.third_party),
+            },
+            "reductions": {
+                "extensions_to_remove": sorted(extensions_to_remove),
+                "extension_patterns": sorted(set(extension_patterns)),
+                "stdlib_to_remove": sorted(set(stdlib_to_remove)),
+            },
+            "warnings": warnings_list,
+        }
+
+        # Determine output path
+        if output_path is None:
+            output_file = Path.cwd() / "reduction-manifest.json"
+        else:
+            output_file = Path(output_path)
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write the manifest
+        with open(output_file, "w") as f:
+            json.dump(manifest, f, indent=2)
+
+        # Print summary
+        print("\n[Analysis Summary]")
+        print(f"  Packages analyzed:     {len(self.pkgs) if self.pkgs else 0}")
+        print(f"  Required extensions:   {len(result.required_extensions)}")
+        print(f"  Removable extensions:  {len(extensions_to_remove)}")
+        print(f"  Removable stdlib dirs: {len(stdlib_to_remove)}")
+
+        if result.needed_but_disabled:
+            print("\n[WARNING] Required modules are DISABLED in config:")
+            for mod in sorted(result.needed_but_disabled):
+                print(f"    {mod}")
+            print("  Consider using a config that enables these modules.")
+
+        print(f"\n[Removable Extensions] ({len(extensions_to_remove)})")
+        for mod in sorted(extensions_to_remove)[:15]:
+            print(f"    {mod}")
+        if len(extensions_to_remove) > 15:
+            print(f"    ... and {len(extensions_to_remove) - 15} more")
+
+        print(f"\n[Removable Stdlib] ({len(stdlib_to_remove)})")
+        for path in sorted(stdlib_to_remove)[:10]:
+            print(f"    {path}")
+        if len(stdlib_to_remove) > 10:
+            print(f"    ... and {len(stdlib_to_remove) - 10} more")
+
+        print("\n[Output]")
+        print(f"  Manifest: {output_file}")
+
+        print("\n[Next Steps]")
+        print("  1. Build Python without zipping stdlib:")
+        print(f"       buildpy -c {self.config} --skip-ziplib")
+        print("  2. Apply reductions to the build:")
+        print(f"       buildpy --apply-reductions {output_file}")
+        print("  3. Compress the reduced stdlib:")
+        print("       buildpy --ziplib")
+        print("  Or apply to a copy for testing:")
+        print(
+            f"       buildpy --apply-reductions {output_file} --reduction-copy build/reduced"
+        )
+        print("       buildpy --ziplib --install-dir build/reduced")
+
+        print("\n" + "=" * 70 + "\n")
+
+        return output_file
+
+    def apply_reductions(
+        self,
+        manifest_path: Pathlike,
+        copy_to: Optional[Pathlike] = None,
+    ) -> Optional[Path]:
+        """Apply reduction manifest to remove unused files from build.
+
+        This should be called after a successful build but before ziplib
+        would be called on a fresh build. For existing builds, this removes
+        files from lib-dynload/ and lib/pythonX.Y/.
+
+        Args:
+            manifest_path: Path to the reduction manifest JSON file.
+            copy_to: If provided, copy the build to this directory first
+                     and apply reductions to the copy (safer for testing).
+
+        Returns:
+            Path to the reduced build directory, or None on failure.
+        """
+        manifest_file = Path(manifest_path)
+        if not manifest_file.exists():
+            print(f"Error: Manifest file not found: {manifest_file}")
+            return None
+
+        with open(manifest_file) as f:
+            manifest = json.load(f)
+
+        print("\n" + "=" * 70)
+        print("APPLYING REDUCTIONS")
+        print("=" * 70)
+
+        # Determine target directory
+        if copy_to:
+            target_prefix = Path(copy_to)
+            print("\n[Copying Build]")
+            print(f"  Source: {self.prefix}")
+            print(f"  Target: {target_prefix}")
+
+            if target_prefix.exists():
+                print("  Removing existing target directory...")
+                shutil.rmtree(target_prefix)
+
+            shutil.copytree(self.prefix, target_prefix, symlinks=True)
+            print("  Copy complete.")
+        else:
+            target_prefix = self.prefix
+            print("\n[Target Build]")
+            print(f"  {target_prefix}")
+
+        # Determine lib paths
+        lib_dir = target_prefix / "lib" / f"python{self.ver}"
+        dynload_dir = lib_dir / "lib-dynload"
+
+        if not lib_dir.exists():
+            print(f"Error: Library directory not found: {lib_dir}")
+            return None
+
+        # Check if stdlib is already zipped
+        zip_name = f"python{self.ver.replace('.', '')}.zip"
+        zip_path = target_prefix / "lib" / zip_name
+        stdlib_is_zipped = zip_path.exists()
+
+        if stdlib_is_zipped:
+            # Check if stdlib directories exist (not just os.py which is kept outside zip)
+            # Exclude lib-dynload, site-packages
+            stdlib_dirs = [
+                d
+                for d in lib_dir.iterdir()
+                if d.is_dir()
+                and d.name not in ("lib-dynload", "site-packages", "__pycache__")
+            ]
+            if len(stdlib_dirs) == 0:
+                print("\n[WARNING] Stdlib appears to be zipped already!")
+                print(f"  Found: {zip_path}")
+                print("  Stdlib reductions will have no effect on zipped content.")
+                print("  Rebuild with --skip-ziplib to apply stdlib reductions.")
+                print("  Extension reductions may still work if using shared builds.")
+
+        # Track what we remove
+        removed_extensions = 0
+        removed_stdlib = 0
+        bytes_saved = 0
+
+        # Remove extension modules from lib-dynload
+        print("\n[Removing Extensions]")
+        if dynload_dir.exists():
+            for pattern in manifest["reductions"].get("extension_patterns", []):
+                for ext_file in dynload_dir.glob(pattern):
+                    if ext_file.is_file():
+                        size = ext_file.stat().st_size
+                        ext_file.unlink()
+                        removed_extensions += 1
+                        bytes_saved += size
+                        self.log.debug(
+                            "Removed extension: %s (%d bytes)", ext_file.name, size
+                        )
+
+        print(f"  Removed {removed_extensions} extension files")
+
+        # Remove stdlib directories/files
+        print("\n[Removing Stdlib Modules]")
+        for rel_path in manifest["reductions"].get("stdlib_to_remove", []):
+            target = lib_dir / rel_path
+            if target.exists():
+                if target.is_dir():
+                    dir_size = sum(
+                        p.stat().st_size for p in target.rglob("*") if p.is_file()
+                    )
+                    shutil.rmtree(target)
+                    bytes_saved += dir_size
+                    removed_stdlib += 1
+                    self.log.debug(
+                        "Removed directory: %s (%d bytes)", rel_path, dir_size
+                    )
+                else:
+                    size = target.stat().st_size
+                    target.unlink()
+                    bytes_saved += size
+                    removed_stdlib += 1
+                    self.log.debug("Removed file: %s (%d bytes)", rel_path, size)
+
+        print(f"  Removed {removed_stdlib} stdlib modules/directories")
+
+        # Summary
+        print("\n[Summary]")
+        print(f"  Extensions removed: {removed_extensions}")
+        print(f"  Stdlib removed:     {removed_stdlib}")
+        print(f"  Space saved:        {bytes_saved / 1024 / 1024:.2f} MB")
+        print(f"  Reduced build at:   {target_prefix}")
+
+        print("\n[Testing]")
+        test_python = target_prefix / "bin" / "python3"
+        print(f'  Test with: {test_python} -c "import sys; print(sys.version)"')
+
+        print("\n" + "=" * 70 + "\n")
+
+        return target_prefix
+
+    def auto_reduce(self) -> bool:
+        """Automatic workflow: analyze deps, build, reduce, and compress.
+
+        This combines the full reduction workflow into a single operation:
+        1. Analyze package dependencies to determine required modules
+        2. Build Python with shared_vanilla config (all modules as shared)
+        3. Apply reductions to remove unused extensions and stdlib
+        4. Compress the reduced stdlib
+
+        Returns:
+            True on success, False on failure.
+        """
+        print("\n" + "=" * 70)
+        print("AUTO-REDUCE WORKFLOW")
+        print("=" * 70)
+
+        if not self.pkgs:
+            print("\nError: --auto-reduce requires packages to analyze.")
+            print("       Use -i/--install to specify packages, e.g.:")
+            print("       buildpy -i ipython --auto-reduce")
+            return False
+
+        # Step 1: Analyze dependencies using shared_vanilla config
+        # (since that's what we'll actually build)
+        print("\n[Step 1/6] Analyzing package dependencies...")
+        original_config = self.config
+        self.config = "shared_vanilla"
+        result = self._analyze_package_deps(verbose=False)
+        self.config = original_config
+        if result is None:
+            print("Error: Dependency analysis failed.")
+            return False
+
+        print(f"  Packages: {', '.join(self.pkgs)}")
+        print(f"  Required extensions: {len(result.required_extensions)}")
+        print(f"  Potentially unused: {len(result.potentially_unused)}")
+
+        # Generate reduction manifest in memory
+        extensions_to_remove: list[str] = []
+        for mod in result.potentially_unused:
+            if mod not in self.CORE_MODULES:
+                extensions_to_remove.append(mod)
+
+        extension_patterns: list[str] = []
+        for mod in extensions_to_remove:
+            extension_patterns.append(f"{mod}.cpython-*.so")
+            extension_patterns.append(f"{mod}.*.so")
+
+        # Determine removable stdlib
+        stdlib_module_paths: dict[str, list[str]] = {
+            "tkinter": ["tkinter/", "turtle.py", "turtledemo/"],
+            "idlelib": ["idlelib/"],
+            "test": ["test/"],
+            "lib2to3": ["lib2to3/"],
+            "distutils": ["distutils/"],
+            "curses": ["curses/"],
+            "dbm": ["dbm/"],
+            "multiprocessing": ["multiprocessing/"],
+            "concurrent": ["concurrent/"],
+            "asyncio": ["asyncio/"],
+            "email": ["email/"],
+            "html": ["html/"],
+            "http": ["http/"],
+            "json": ["json/"],
+            "logging": ["logging/"],
+            "unittest": ["unittest/"],
+            "urllib": ["urllib/"],
+            "xml": ["xml/"],
+            "xmlrpc": ["xmlrpc/"],
+            "ctypes": ["ctypes/"],
+            "sqlite3": ["sqlite3/"],
+            "pydoc_data": ["pydoc_data/"],
+        }
+
+        stdlib_to_remove: list[str] = []
+        required_stdlib = result.stdlib_imports | {"ensurepip", "pip", "setuptools"}
+        for mod, paths in stdlib_module_paths.items():
+            if mod not in required_stdlib and paths:
+                stdlib_to_remove.extend(paths)
+
+        manifest: dict[str, Any] = {
+            "reductions": {
+                "extensions_to_remove": sorted(extensions_to_remove),
+                "extension_patterns": sorted(set(extension_patterns)),
+                "stdlib_to_remove": sorted(set(stdlib_to_remove)),
+            }
+        }
+
+        # Step 2: Ensure vanilla build exists (cached) and copy for reduction
+        print("\n[Step 2/6] Preparing vanilla build...")
+
+        # Cache location for unreduced vanilla build
+        vanilla_cache = self.project.install / "python-shared-vanilla"
+        # Reduced build location (final output)
+        reduced_prefix = self.project.install / "python-shared-reduced"
+
+        # Build vanilla if not cached
+        if not vanilla_cache.exists():
+            print("  Building vanilla cache (first time only)...")
+            print("  (All modules built as shared extensions)")
+
+            # Switch to shared_vanilla config for the build
+            original_config = self.config
+            original_install_dir = self._install_dir
+            self.config = "shared_vanilla"
+            self._install_dir = vanilla_cache
+
+            # Build without zipping and without installing packages
+            # (keep self.pkgs so ensurepip is included in the build)
+            original_skip_ziplib = self.skip_ziplib
+            self.skip_ziplib = True
+            self._skip_pkg_install = True
+
+            try:
+                self.process()
+            except Exception as e:
+                print(f"\nError during build: {e}")
+                return False
+            finally:
+                self.config = original_config
+                self._install_dir = original_install_dir
+                self.skip_ziplib = original_skip_ziplib
+                self._skip_pkg_install = False
+        else:
+            print(f"  Using cached vanilla build: {vanilla_cache}")
+
+        # Copy vanilla cache to reduced location
+        print(f"  Copying to: {reduced_prefix}")
+        if reduced_prefix.exists():
+            shutil.rmtree(reduced_prefix)
+        shutil.copytree(vanilla_cache, reduced_prefix, symlinks=True)
+
+        lib_dir = reduced_prefix / "lib" / f"python{self.ver}"
+        site_packages = lib_dir / "site-packages"
+        dynload_dir = lib_dir / "lib-dynload"
+
+        # Install packages BEFORE reductions (while all modules available)
+        # Then move them to temp so they're not zipped (extensions can't be in zips)
+        pkg_temp_dir: Path | None = None
+        if self.pkgs:
+            print("\n[Step 3/6] Installing packages...")
+            print(f"  Packages: {', '.join(self.pkgs)}")
+            original_install_dir = self._install_dir
+            self._install_dir = reduced_prefix
+            try:
+                self.install_pkgs()
+            finally:
+                self._install_dir = original_install_dir
+
+            # Move installed packages to temp (preserve for after zipping)
+            print("  Moving packages to temp (extensions can't be in zips)...")
+            pkg_temp_dir = self.project.build / "pkg_temp"
+            if pkg_temp_dir.exists():
+                shutil.rmtree(pkg_temp_dir)
+            if site_packages.exists():
+                shutil.move(str(site_packages), str(pkg_temp_dir))
+                print(f"  Moved to: {pkg_temp_dir}")
+            else:
+                print(f"  WARNING: site-packages not found at {site_packages}")
+                pkg_temp_dir = None
+            # Recreate empty site-packages for zipping
+            site_packages.mkdir(exist_ok=True)
+
+        # Step 4: Apply reductions to the copy
+        print("\n[Step 4/6] Applying reductions...")
+
+        removed_extensions = 0
+        removed_stdlib = 0
+        bytes_saved = 0
+
+        # Remove extension modules
+        if dynload_dir.exists():
+            for pattern in manifest["reductions"].get("extension_patterns", []):
+                for ext_file in dynload_dir.glob(pattern):
+                    if ext_file.is_file():
+                        size = ext_file.stat().st_size
+                        ext_file.unlink()
+                        removed_extensions += 1
+                        bytes_saved += size
+
+        print(f"  Extensions removed: {removed_extensions}")
+
+        # Remove stdlib modules
+        for rel_path in manifest["reductions"].get("stdlib_to_remove", []):
+            target = lib_dir / rel_path
+            if target.exists():
+                if target.is_dir():
+                    dir_size = sum(
+                        p.stat().st_size for p in target.rglob("*") if p.is_file()
+                    )
+                    shutil.rmtree(target)
+                    bytes_saved += dir_size
+                    removed_stdlib += 1
+                else:
+                    size = target.stat().st_size
+                    target.unlink()
+                    bytes_saved += size
+                    removed_stdlib += 1
+
+        print(f"  Stdlib removed: {removed_stdlib}")
+        print(f"  Space saved: {bytes_saved / 1024 / 1024:.2f} MB")
+
+        # Step 5: Compress stdlib
+        print("\n[Step 5/6] Compressing stdlib...")
+        # Temporarily switch install_dir to reduced_prefix for ziplib
+        original_install_dir = self._install_dir
+        self._install_dir = reduced_prefix
+        try:
+            self.ziplib()
+        finally:
+            self._install_dir = original_install_dir
+
+        # Step 6: Restore packages to site-packages (outside the zip)
+        if pkg_temp_dir and pkg_temp_dir.exists():
+            print("\n[Step 6/6] Restoring packages to site-packages...")
+            print(f"  Source: {pkg_temp_dir}")
+            # Remove the empty site-packages created by ziplib
+            final_site_packages = lib_dir / "site-packages"
+            if final_site_packages.exists():
+                shutil.rmtree(final_site_packages)
+            # Copy packages back (excluding pip/ensurepip cruft)
+            shutil.copytree(pkg_temp_dir, final_site_packages, symlinks=True)
+            # Clean up temp
+            shutil.rmtree(pkg_temp_dir)
+            # Remove pip and setuptools from site-packages (not needed at runtime)
+            for pattern in [
+                "pip",
+                "pip-*",
+                "setuptools",
+                "setuptools-*",
+                "_distutils_hack",
+            ]:
+                for item in final_site_packages.glob(pattern):
+                    if item.is_dir():
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+            # List what was restored
+            restored = [
+                p.name
+                for p in final_site_packages.iterdir()
+                if not p.name.startswith(".")
+            ]
+            print(f"  Packages restored: {', '.join(restored)}")
+        elif self.pkgs:
+            print("\n[Step 6/6] WARNING: No packages to restore (pkg_temp missing)")
+
+        # Summary
+        print("\n" + "=" * 70)
+        print("AUTO-REDUCE COMPLETE")
+        print("=" * 70)
+        print(f"\n  Python version:     {self.version}")
+        print(f"  Packages analyzed:  {', '.join(self.pkgs)}")
+        print(f"  Extensions removed: {removed_extensions}")
+        print(f"  Stdlib removed:     {removed_stdlib}")
+        print(f"  Space saved:        {bytes_saved / 1024 / 1024:.2f} MB")
+        print(f"  Vanilla cache:      {vanilla_cache}")
+        print(f"  Reduced build:      {reduced_prefix}")
+
+        # Verify the build works by importing installed packages
+        print("\n[Verification]")
+        test_python = reduced_prefix / "bin" / "python3"
+        verification_passed = True
+
+        if self.pkgs:
+            for pkg in self.pkgs:
+                # Get the import name (some packages have different import names)
+                import_name = pkg.split("[")[0].replace("-", "_").lower()
+                try:
+                    import_result = subprocess.run(
+                        [str(test_python), "-c", f"import {import_name}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if import_result.returncode == 0:
+                        print(f"  import {import_name}: OK")
+                    else:
+                        print(f"  import {import_name}: FAILED")
+                        print(f"    {import_result.stderr.strip().split(chr(10))[-1]}")
+                        verification_passed = False
+                except subprocess.TimeoutExpired:
+                    print(f"  import {import_name}: TIMEOUT")
+                    verification_passed = False
+                except Exception as e:
+                    print(f"  import {import_name}: ERROR ({e})")
+                    verification_passed = False
+
+        if not verification_passed:
+            print(
+                "\n  WARNING: Some imports failed. The build may be missing required modules."
+            )
+
+        print("\n" + "=" * 70 + "\n")
+        return verification_passed
 
     def _compute_loader_path(self, dylib_path: Path) -> str:
         """Compute @loader_path for install_name_tool based on install_dir
@@ -1807,6 +3316,9 @@ class PythonBuilder(Builder):
         """python builder prefix path"""
         if PLATFORM == "Darwin" and self.build_type == "framework":
             return self._install_dir / "Python.framework" / "Versions" / self.ver
+        # If _install_dir was explicitly set (different from default), use it directly
+        if self._install_dir != self.project.install:
+            return self._install_dir
         name = self.name.lower() + "-" + self.build_type
         return self.project.install / name
 
@@ -2138,8 +3650,11 @@ class PythonBuilder(Builder):
         self.build()
         self.install()
         self.clean()
-        self.ziplib()
-        if self.pkgs:
+        if self.skip_ziplib:
+            self.log.info("skipping ziplib (--skip-ziplib specified)")
+        else:
+            self.ziplib()
+        if self.pkgs and not getattr(self, "_skip_pkg_install", False):
             self.install_pkgs()
         self.post_process()
 
@@ -2416,6 +3931,7 @@ def main() -> None:
     opt("-b", "--optimize-bytecode", help="set optimization levels -1 .. 2 (default: %(default)s)", type=int, default=-1)
     opt("-c", "--config", default="shared_mid", help="build configuration (default: %(default)s)", metavar="NAME")
     opt("-d", "--debug", help="build debug python", action="store_true")
+    opt("-n", "--dry-run", help="show build plan without building", action="store_true")
     opt("-e", "--embeddable-pkg", help="install python embeddable package", action="store_true")
     opt("-i", "--install", help="install python pkgs", type=str, nargs="+", metavar="PKG")
     opt("-m", "--package", help="package build", action="store_true")
@@ -2427,6 +3943,22 @@ def main() -> None:
     opt("-j", "--jobs", help="# of build jobs (default: %(default)s)", type=int, default=4)
     opt("-s", "--json", help="serialize config to json file", action="store_true")
     opt("-t", "--type", help="build based on build type")
+    opt("-S", "--size-report", help="show size breakdown of build", action="store_true")
+    opt("-A", "--analyze-deps", help="analyze stdlib dependencies of packages", action="store_true")
+    opt("--auto-reduce", action="store_true",
+        help="automatic workflow: analyze deps, build with shared_vanilla, apply reductions, zip stdlib")
+    opt("--auto-config", action="store_true",
+        help="generate reduction manifest based on dependency analysis")
+    opt("--auto-config-output", type=str, metavar="PATH",
+        help="output path for reduction manifest (default: reduction-manifest.json)")
+    opt("--apply-reductions", type=str, metavar="MANIFEST",
+        help="apply reduction manifest to remove unused files from build")
+    opt("--reduction-copy", type=str, metavar="DIR",
+        help="copy build to DIR before applying reductions (safer for testing)")
+    opt("--skip-ziplib", action="store_true",
+        help="skip stdlib compression (use with --apply-reductions workflow)")
+    opt("--ziplib", action="store_true",
+        help="compress stdlib of existing build (after --apply-reductions)")
     opt("--install-dir", help="custom installation directory (overrides --package)", type=str, metavar="DIR")
     # fmt: on
 
@@ -2472,7 +4004,32 @@ def main() -> None:
             jobs=args.jobs,
             is_package=is_package,
             install_dir=args.install_dir,
+            skip_ziplib=args.skip_ziplib,
         )
+        if args.dry_run:
+            builder.dry_run()
+            sys.exit(0)
+        if args.size_report:
+            builder.size_report()
+            sys.exit(0)
+        if args.auto_reduce:
+            success = builder.auto_reduce()
+            sys.exit(0 if success else 1)
+        if args.analyze_deps:
+            builder.analyze_deps()
+            if args.auto_config:
+                result = builder.auto_configure(
+                    output_path=args.auto_config_output,
+                )
+                if result:
+                    print(f"Reduction manifest written to: {result}")
+            sys.exit(0)
+        if args.apply_reductions:
+            result = builder.apply_reductions(
+                manifest_path=args.apply_reductions,
+                copy_to=args.reduction_copy,
+            )
+            sys.exit(0 if result else 1)
         if args.reset:
             builder.remove("build")
         builder.process()
@@ -2494,7 +4051,19 @@ def main() -> None:
         jobs=args.jobs,
         is_package=args.package,
         install_dir=args.install_dir,
+        skip_ziplib=args.skip_ziplib,
     )
+
+    # Handle --ziplib: compress stdlib of existing build
+    if args.ziplib:
+        if not builder.prefix.exists():
+            print(f"Error: Build not found at {builder.prefix}")
+            sys.exit(1)
+        print(f"Compressing stdlib at {builder.prefix}...")
+        builder.ziplib()
+        print("Done.")
+        sys.exit(0)
+
     if args.write:
         if not args.json:
             patch_dir = Path.cwd() / "patch"
@@ -2505,6 +4074,35 @@ def main() -> None:
         else:
             builder.get_config().write_json(args.config, to=args.json)
             sys.exit()
+
+    if args.dry_run:
+        builder.dry_run()
+        sys.exit(0)
+
+    if args.size_report:
+        builder.size_report()
+        sys.exit(0)
+
+    if args.auto_reduce:
+        success = builder.auto_reduce()
+        sys.exit(0 if success else 1)
+
+    if args.analyze_deps:
+        builder.analyze_deps()
+        if args.auto_config:
+            result = builder.auto_configure(
+                output_path=args.auto_config_output,
+            )
+            if result:
+                print(f"Reduction manifest written to: {result}")
+        sys.exit(0)
+
+    if args.apply_reductions:
+        result = builder.apply_reductions(
+            manifest_path=args.apply_reductions,
+            copy_to=args.reduction_copy,
+        )
+        sys.exit(0 if result else 1)
 
     if args.reset:
         builder.remove("build")

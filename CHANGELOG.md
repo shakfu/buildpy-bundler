@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Dry-run mode** (`-n, --dry-run`): Preview build plan without building
+  - Shows Python version, configuration, build/size type, platform
+  - Displays configure options, dependencies, and module lists (core, static, shared, disabled)
+  - Shows packages to be installed and installation directories
+  - Useful for debugging configurations before committing to a build
+
+- **Size report** (`-S, --size-report`): Analyze size breakdown of completed build
+  - Shows component sizes: binaries, stdlib, lib-dynload, shared libraries, headers
+  - Displays percentage breakdown and total size
+  - Lists top 10 largest files
+  - Useful for optimizing embedded deployments
+
+- **Module dependency analyzer** (`-A, --analyze-deps`): Analyze stdlib dependencies of packages
+  - Downloads packages specified via `-i/--install` and analyzes their Python files
+  - Uses AST-based import detection to find stdlib module usage
+  - Maps high-level imports to required C extension modules (e.g., `ssl` -> `_ssl`)
+  - Compares against current config to identify disabled modules that need enabling
+  - Identifies potentially unused modules that could be disabled for size optimization
+  - Provides recommendations for config adjustments
+
+- **Auto-configure feature** (`--auto-config`): Generate reduction manifest based on dependency analysis
+  - Generates JSON manifest listing files to remove post-build (not Setup.local)
+  - This approach preserves modules needed by ensurepip during build
+  - Reductions are applied after build completes, before stdlib compression
+  - `--auto-config-output PATH`: Custom output path for manifest (default: reduction-manifest.json)
+  - Example: `buildpy -A -i ipython --auto-config`
+
+- **Apply reductions** (`--apply-reductions`): Remove unused files from a completed build
+  - Takes a reduction manifest JSON file and removes listed extensions/stdlib modules
+  - `--reduction-copy DIR`: Apply reductions to a copy of the build (safer for testing)
+  - `--skip-ziplib`: Build without compressing stdlib (required for reduction workflow)
+  - `--ziplib`: Compress stdlib after applying reductions
+  - Full workflow: `buildpy --skip-ziplib` -> `--apply-reductions` -> `--ziplib`
+  - Non-destructive workflow: build normally, then slim down the result
+
+- **Automatic size optimization** (`--auto-reduce`): Single-command workflow for size-optimized builds
+  - Analyzes dependencies of packages specified via `-i/--install`
+  - Caches the vanilla build at `build/install/python-shared-vanilla` for reuse
+  - Copies cached build to `build/install/python-shared-reduced` for reduction
+  - Applies reductions to remove unused extensions and stdlib modules
+  - Compresses the reduced stdlib
+  - Subsequent runs reuse the cached vanilla build (fast iterations)
+  - Example: `buildpy -i ipython --auto-reduce`
+
+- **Vanilla configuration** (`shared_vanilla`): New configuration for maximum flexibility
+  - Builds most modules as shared extensions for post-build removal
+  - Keeps core modules static that reference internal Python symbols (`_typing`, `_functools`, `_locale`, `_signal`, `_sre`, `_thread`, `posix`, `time`)
+  - Enables optional modules like `_ctypes`, `_curses`, `_dbm`, `resource`, `syslog`, `termios`
+  - Designed for post-build reduction workflows where unused extensions are removed
+  - Used automatically by `--auto-reduce`
+
+### Fixed
+
+- **Config shallow copy bug**: Changed `Config.__init__` to use `copy.deepcopy()` instead of shallow `copy()`, preventing shared state between Config instances when creating multiple configurations
+
+- **shared_vanilla build failure**: Fixed `_typing` module failing to build as shared library due to referencing internal Python symbol `__PyTypeAlias_Type`. Modules with `Py_BUILD_CORE_BUILTIN` flag or internal symbol dependencies now remain static
+
+- **auto-reduce prefix bug**: Fixed `PythonBuilder.prefix` property to respect `_install_dir` when explicitly set, ensuring vanilla cache builds to correct location (`python-shared-vanilla` instead of `python-shared`)
+
+- **auto-reduce analysis config mismatch**: Fixed analysis to use `shared_vanilla` config (matching the actual build), so modules like `_ssl` disabled in user's config are correctly identified as removable
+
+- **zlib required for zipped stdlib**: Added `zlib` to `CORE_MODULES` since it's required to decompress the zipped stdlib at runtime
+
+- **ensurepip missing in vanilla cache**: Fixed vanilla build to include ensurepip by using `_skip_pkg_install` flag instead of clearing `self.pkgs`, ensuring packages can be installed to reduced build
+
+- **Package installation workflow**: Restructured auto-reduce to install packages before reductions (while all modules available), preserve them in temp during stdlib zipping, then restore to site-packages outside the zip (C extensions cannot be loaded from zips)
+
+- **Transitive stdlib dependencies**: Added mappings for transitive dependencies in `STDLIB_TO_EXTENSION`:
+  - `inspect` -> `_opcode` (via dis/opcode chain)
+  - `dis` -> `_opcode`
+  - `subprocess` -> `_posixsubprocess`, `select`, `fcntl`
+  - `random` -> `_random`
+  - `heapq` -> `_heapq`
+  - `bisect` -> `_bisect`
+
 ## [0.1.1]
 
 ### Changed
