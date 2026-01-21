@@ -41,11 +41,6 @@ Future feature ideas for buildpy-bundler.
   - Track build state in a checkpoint file
   - Avoid re-downloading/re-extracting already completed steps
 
-- [ ] **Parallel dependency building**
-  - Build OpenSSL, bzip2, and xz concurrently since they're independent
-  - Could significantly speed up fresh builds (3x improvement potential)
-  - Use `concurrent.futures` or `multiprocessing`
-
 - [ ] **Build manifest**
   - Generate a JSON/YAML manifest recording:
     - Exact versions of Python and dependencies
@@ -61,11 +56,6 @@ Future feature ideas for buildpy-bundler.
   - Build fat binaries containing both x86_64 and arm64 architectures
   - Use `lipo` to combine architecture-specific builds
   - Useful for distributing single binaries that work on Intel and Apple Silicon
-
-- [ ] **Strip/compress options**
-  - `--strip` - Strip debug symbols from binaries for smaller size
-  - `--compress` - UPX compression for minimal binary size
-  - Report size savings after optimization
 
 ## Workflow
 
