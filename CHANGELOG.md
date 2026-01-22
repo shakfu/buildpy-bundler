@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2]
+
+### Fixed
+
+- Fixed `ValueError` in `PythonConfig313.patch()` where `ossaudiodev` and `spwd` were not in the disabled list on Linux (they were moved to static by the parent class)
+- Added Linux platform support in `main()` - was previously raising `NotImplementedError`
+
+### Added
+
+- Added Linux dependencies documentation in README.md (`libsqlite3-dev`, `libpython3-dev`, `patchelf`)
+
+## [0.1.1]
+
 ### Added
 
 - **Dry-run mode** (`-n, --dry-run`): Preview build plan without building

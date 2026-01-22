@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union
 from urllib.request import urlretrieve
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 # ----------------------------------------------------------------------------
 # type aliases
@@ -851,8 +851,12 @@ class PythonConfig313(PythonConfig312):
         self.cfg["disabled"].remove("_xxsubinterpreters")
         self.cfg["disabled"].remove("audioop")
         self.cfg["disabled"].remove("nis")
-        self.cfg["disabled"].remove("ossaudiodev")
-        self.cfg["disabled"].remove("spwd")
+        # ossaudiodev and spwd may have been moved to static on Linux by PythonConfig311
+        for name in ["ossaudiodev", "spwd"]:
+            if name in self.cfg["disabled"]:
+                self.cfg["disabled"].remove(name)
+            elif name in self.cfg["static"]:
+                self.cfg["static"].remove(name)
 
         self.cfg["disabled"].append("_testexternalinspection")
 
@@ -3970,6 +3974,11 @@ def main() -> None:
         if args.debug:
             python_builder_class = PythonDebugBuilder
 
+    elif PLATFORM == "Linux":
+        python_builder_class = PythonBuilder
+        if args.debug:
+            python_builder_class = PythonDebugBuilder
+
     elif PLATFORM == "Windows":
         if args.embeddable_pkg:
             embeddable_builder = WindowsEmbeddablePythonBuilder()
@@ -3979,7 +3988,7 @@ def main() -> None:
             python_builder_class = WindowsPythonBuilder
 
     else:
-        raise NotImplementedError("script only works on MacOS and Windows")
+        raise NotImplementedError("script only works on MacOS, Linux, and Windows")
 
     builder: PythonBuilder
     if args.type and args.type in BUILD_TYPES:
