@@ -21,7 +21,7 @@ A lightweight, single-file Python build tool for compiling Python 3.11-3.14 from
 Install development libraries and tools:
 
 ```bash
-sudo apt install libsqlite3-dev libpython3-dev patchelf
+sudo apt install libsqlite3-dev libpython3-dev uuid-dev pathelf
 ```
 
 ## Quick Start
