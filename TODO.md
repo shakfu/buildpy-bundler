@@ -6,10 +6,6 @@ Future feature ideas for buildpy-bundler.
 
 ## High
 
-## Medium
-
-## Low
-
 ### Build Reliability
 
 - [ ] **Resume interrupted builds**
@@ -26,12 +22,7 @@ Future feature ideas for buildpy-bundler.
     - Platform/architecture info
   - Enables reproducibility auditing and build verification
 
-### Platform-Specific
-
-- [ ] **macOS universal binaries**
-  - Build fat binaries containing both x86_64 and arm64 architectures
-  - Use `lipo` to combine architecture-specific builds
-  - Useful for distributing single binaries that work on Intel and Apple Silicon
+## Medium
 
 ### Workflow
 
@@ -45,6 +36,15 @@ Future feature ideas for buildpy-bundler.
   - Beyond the built-in static_mid, shared_max, etc.
   - Load with `--preset FILE` or from `.buildpy.toml`
   - Share configurations across team/organization
+
+## Low
+
+### Platform-Specific
+
+- [ ] **macOS universal binaries**
+  - Build fat binaries containing both x86_64 and arm64 architectures
+  - Use `lipo` to combine architecture-specific builds
+  - Useful for distributing single binaries that work on Intel and Apple Silicon
 
 ### Future Considerations
 
@@ -60,36 +60,5 @@ Future feature ideas for buildpy-bundler.
   - Sign built binaries for Gatekeeper compliance
   - Support for Developer ID and ad-hoc signing
 
-## Done
 
-### Build Analysis & Optimization
 
-- [x] **Size report** (`-S, --size-report`) - IMPLEMENTED
-  - Generate a breakdown of build size by component (stdlib, lib-dynload, binaries, etc.)
-  - Shows percentage breakdown and top 10 largest files
-  - Useful for optimizing embedded deployments
-
-- [x] **Module dependency analyzer** (`-A, --analyze-deps`) - IMPLEMENTED
-  - Analyzes packages specified via `-i/--install` for stdlib module usage
-  - Uses AST-based import detection to find stdlib dependencies
-  - Maps imports to required C extension modules (e.g., `ssl` -> `_ssl`)
-  - Compares against current config and provides recommendations
-
-- [x] **Auto-configure** (`--auto-config`) - IMPLEMENTED
-  - Generates a reduction manifest (JSON) based on dependency analysis
-  - Lists extension modules and stdlib directories that can be removed post-build
-  - Preserves modules needed by ensurepip (unlike Setup.local approach)
-  - Custom output path with `--auto-config-output PATH`
-
-- [x] **Apply reductions** (`--apply-reductions`) - IMPLEMENTED
-  - Applies reduction manifest to remove unused files from completed build
-  - Works on lib-dynload/ extensions and lib/pythonX.Y/ stdlib modules
-  - `--reduction-copy DIR` to apply to a copy (safer for testing)
-  - `--skip-ziplib` to build without compressing stdlib
-  - `--ziplib` to compress stdlib after reductions
-  - Workflow: `--skip-ziplib` -> `--apply-reductions` -> `--ziplib`
-
-- [x] **Dry-run mode** (`-n, --dry-run`) - IMPLEMENTED
-  - Show what would be built (config options, modules, dependencies) without actually building
-  - Useful for debugging configs and understanding build behavior
-  - Display configure options, modules to be built, dependencies
